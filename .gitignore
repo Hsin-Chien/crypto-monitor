@@ -1,0 +1,15 @@
+# 忽略編譯出來的執行檔 (Windows)
+*.exe
+*.dll
+
+# 忽略編譯出來的執行檔 (Mac/Linux)
+*.so
+*.dylib
+test
+main
+
+# 忽略專案同名執行檔
+crypto-monitor
+
+# 忽略 VS Code 的個人設定資料夾 (選填，通常建議忽略)
+.vscode/
