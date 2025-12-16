@@ -4,58 +4,64 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
+	"os"
 	"time"
 
 	"github.com/gorilla/websocket"
 )
 
-// 定義資料結構：這就像是告訴 Go，等一下收到的 JSON 資料長什麼樣子
-// 我們只抓取兩個欄位：'s' (交易對名稱) 和 'p' (成交價格)
+// 定義資料結構
 type TradeEvent struct {
 	Symbol string `json:"s"`
 	Price  string `json:"p"`
 }
 
 func main() {
-	// 1. 設定幣安 (Binance) 的公開 WebSocket 網址
-	// btcusdt@trade 代表訂閱比特幣/USDT 的即時成交資訊
+	// --- 關鍵修改：Cloud Run 必要設定 ---
+	// 必須要有一個 HTTP Server 監聽 PORT，否則 Cloud Run 會判定失敗
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	// 啟動一個背景 Goroutine 來處理 HTTP 請求
+	go func() {
+		log.Printf("Starting web server on port %s", port)
+		http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprintf(w, "Crypto Monitor is Running! 🚀")
+		})
+		// 如果 Web Server 啟動失敗，直接讓程式崩潰重啟
+		if err := http.ListenAndServe(":"+port, nil); err != nil {
+			log.Fatal(err)
+		}
+	}()
+	// ----------------------------------
+
+	// --- 你的業務邏輯 (WebSocket) ---
 	url := "wss://stream.binance.com:9443/ws/btcusdt@trade"
+	log.Printf("Connecting to %s", url)
 
-	fmt.Printf("準備連線到幣安: %s ...\n", url)
-
-	// 2. 建立連線
-	// DefaultDialer 就像是幫我們撥電話的總機
 	c, _, err := websocket.DefaultDialer.Dial(url, nil)
 	if err != nil {
-		log.Fatal("連線失敗，請檢查網路:", err)
+		log.Printf("WebSocket connection failed: %v", err)
+		// 為了防止程式直接退出導致 Cloud Run 以為我們死了，
+		// 這裡即使連線失敗，我們也讓程式保持活著 (用 select{})
+		// 下一步我們再來寫「斷線重連」
+		select {}
 	}
-	// defer 確保程式結束前會把電話掛斷 (關閉連線)
 	defer c.Close()
 
-	fmt.Println("連線成功！正在等待比特幣價格進來...")
+	log.Println("Connected to Binance!")
 
-	// 3. 開始無窮迴圈，持續收聽
 	for {
-		// 讀取從幣安傳過來的訊息
 		_, message, err := c.ReadMessage()
 		if err != nil {
-			log.Println("讀取錯誤:", err)
+			log.Printf("Read error: %v", err)
 			break
 		}
-
-		// 4. 解析資料 (把 JSON 文字轉成我們看得懂的 Go 結構)
 		var event TradeEvent
-		// Unmarshal 就是「解碼」的意思
-		if err := json.Unmarshal(message, &event); err != nil {
-			log.Println("解析錯誤:", err)
-			continue
-		}
-
-		// 5. 漂亮地印出來
-		// time.Now() 抓取現在時間
-		fmt.Printf("[%s] %s 目前價格: %s\n",
-			time.Now().Format("15:04:05"),
-			event.Symbol,
-			event.Price)
+		json.Unmarshal(message, &event)
+		log.Printf("[%s] %s: %s", time.Now().Format("15:04:05"), event.Symbol, event.Price)
 	}
 }
