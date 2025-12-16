@@ -11,57 +11,70 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-// 定義資料結構
 type TradeEvent struct {
 	Symbol string `json:"s"`
 	Price  string `json:"p"`
 }
 
 func main() {
-	// --- 關鍵修改：Cloud Run 必要設定 ---
-	// 必須要有一個 HTTP Server 監聽 PORT，否則 Cloud Run 會判定失敗
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
-
-	// 啟動一個背景 Goroutine 來處理 HTTP 請求
+	// --- 1. 啟動 Web Server (讓 Cloud Run 知道我們活著) ---
 	go func() {
-		log.Printf("Starting web server on port %s", port)
+		port := os.Getenv("PORT")
+		if port == "" {
+			port = "8080"
+		}
 		http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, "Crypto Monitor is Running! 🚀")
 		})
-		// 如果 Web Server 啟動失敗，直接讓程式崩潰重啟
+		log.Printf("Web server listening on port %s", port)
 		if err := http.ListenAndServe(":"+port, nil); err != nil {
 			log.Fatal(err)
 		}
 	}()
-	// ----------------------------------
 
-	// --- 你的業務邏輯 (WebSocket) ---
+	// --- 2. 核心業務：WebSocket 斷線重連機制 ---
 	url := "wss://stream.binance.com:9443/ws/btcusdt@trade"
-	log.Printf("Connecting to %s", url)
 
-	c, _, err := websocket.DefaultDialer.Dial(url, nil)
-	if err != nil {
-		log.Printf("WebSocket connection failed: %v", err)
-		// 為了防止程式直接退出導致 Cloud Run 以為我們死了，
-		// 這裡即使連線失敗，我們也讓程式保持活著 (用 select{})
-		// 下一步我們再來寫「斷線重連」
-		select {}
-	}
-	defer c.Close()
+	// 指數退避設定
+	retryDelay := 1 * time.Second
+	maxDelay := 60 * time.Second
 
-	log.Println("Connected to Binance!")
-
+	// 外層：負責「重連」的無窮迴圈
 	for {
-		_, message, err := c.ReadMessage()
+		log.Printf("Connecting to Binance (%s)...", url)
+		c, _, err := websocket.DefaultDialer.Dial(url, nil)
+
 		if err != nil {
-			log.Printf("Read error: %v", err)
-			break
+			log.Printf("Connection failed: %v", err)
+			log.Printf("Retrying in %v...", retryDelay)
+			time.Sleep(retryDelay)
+
+			// 失敗時，等待時間加倍 (1s -> 2s -> 4s -> ... -> 60s)
+			retryDelay *= 2
+			if retryDelay > maxDelay {
+				retryDelay = maxDelay
+			}
+			continue // 跳回迴圈開頭重試
 		}
-		var event TradeEvent
-		json.Unmarshal(message, &event)
-		log.Printf("[%s] %s: %s", time.Now().Format("15:04:05"), event.Symbol, event.Price)
+
+		// 連線成功！重置等待時間
+		log.Println("✅ Connected to Binance!")
+		retryDelay = 1 * time.Second
+
+		// 內層：負責「讀取資料」的迴圈
+		for {
+			_, message, err := c.ReadMessage()
+			if err != nil {
+				log.Printf("❌ Disconnected: %v", err)
+				c.Close() // 確保關閉舊連線
+				break     // 跳出內層迴圈，觸發外層的重連邏輯
+			}
+
+			var event TradeEvent
+			if err := json.Unmarshal(message, &event); err == nil {
+				log.Printf("[%s] %s: %s", time.Now().Format("15:04:05"), event.Symbol, event.Price)
+			}
+		}
+		// 當程式執行到這裡，代表內層迴圈 break 了，會自動回到外層迴圈進行重連
 	}
 }
