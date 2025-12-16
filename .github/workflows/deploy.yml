@@ -1,0 +1,49 @@
+name: Deploy to Cloud Run
+
+on:
+  push:
+    branches:
+      - main  # 只要推送到 main 分支，就會觸發此流程
+
+env:
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  REGION: asia-east1  # 我們統一用台灣/亞洲節點
+  SERVICE_NAME: crypto-monitor
+  REPO_NAME: crypto-monitor
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest  # 使用 GitHub 提供的 Linux 機器執行
+
+    steps:
+    # 1. 下載你的程式碼
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    # 2. 使用 JSON 鑰匙登入 Google Cloud
+    - name: Google Auth
+      id: auth
+      uses: 'google-github-actions/auth@v1'
+      with:
+        credentials_json: '${{ secrets.GCP_CREDENTIALS }}'
+
+    # 3. 設定 Docker 環境
+    - name: Configure Docker
+      run: gcloud auth configure-docker --quiet
+
+    # 4. 建置 Docker Image 並推送到 Google Container Registry (GCR)
+    - name: Build and Push Docker Image
+      run: |
+        IMAGE_NAME="gcr.io/${{ env.PROJECT_ID }}/${{ env.REPO_NAME }}:${{ github.sha }}"
+        docker build -t $IMAGE_NAME .
+        docker push $IMAGE_NAME
+        echo "IMAGE_URN=$IMAGE_NAME" >> $GITHUB_ENV
+
+    # 5. 部署到 Cloud Run
+    - name: Deploy to Cloud Run
+      uses: 'google-github-actions/deploy-cloudrun@v1'
+      with:
+        service: ${{ env.SERVICE_NAME }}
+        image: ${{ env.IMAGE_URN }}
+        region: ${{ env.REGION }}
+        flags: '--allow-unauthenticated' # 允許公開存取
